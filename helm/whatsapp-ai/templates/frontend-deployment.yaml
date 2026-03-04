@@ -35,6 +35,20 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      initContainers:
+        - name: nginx-config-init
+          image: busybox:1.36
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              DNS=$(awk '/^nameserver/{print $2; exit}' /etc/resolv.conf)
+              sed "s/__RESOLVER__/$DNS/" /tmpl/default.conf.tmpl > /etc/nginx/conf.d/default.conf
+              echo "Resolver set to: $DNS"
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /tmpl
+            - name: nginx-conf-d
+              mountPath: /etc/nginx/conf.d
       containers:
         - name: frontend
           image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"
@@ -58,13 +72,11 @@ spec:
           resources:
             {{- toYaml .Values.frontend.resources | nindent 12 }}
           volumeMounts:
-            # Override the nginx.conf baked into the image with the Helm-rendered one
-            # that points to the correct backend Kubernetes Service DNS name.
-            - name: nginx-config
-              mountPath: /etc/nginx/conf.d/default.conf
-              subPath: default.conf
-              readOnly: true
+            - name: nginx-conf-d
+              mountPath: /etc/nginx/conf.d
       volumes:
         - name: nginx-config
           configMap:
             name: {{ include "whatsapp-ai.frontend.name" . }}-nginx
+        - name: nginx-conf-d
+          emptyDir: {}

@@ -11,6 +11,10 @@ services:
       - NODE_ENV=production
     # Shared memory for Chromium
     shm_size: '1gb'
+    mem_limit: 2g
+    memswap_limit: 2g
+    volumes:
+      - wwebjs_auth:/app/.wwebjs_auth
     ports:
       - "3001:3001"
     networks:
@@ -38,3 +42,6 @@ services:
 networks:
   app-network:
     driver: bridge
+
+volumes:
+  wwebjs_auth:

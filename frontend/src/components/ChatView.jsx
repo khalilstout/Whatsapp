@@ -6,41 +6,61 @@ import { ArrowLeft, ChevronUp, Sparkles, Pin } from 'lucide-react';
 export default function ChatView({ chat, geminiKey, onBack }) {
     const [messages, setMessages] = useState([]);
     const [loading, setLoading] = useState(true);
-    const [limit, setLimit] = useState(100);
+    const [loadingMore, setLoadingMore] = useState(false);
+    const [fetchError, setFetchError] = useState(null);
+    const limitRef = useRef(50);
     const [startingPoint, setStartingPoint] = useState(null); // message id
     const [showAI, setShowAI] = useState(false);
     const bottomRef = useRef(null);
+    const topRef = useRef(null);
 
     const loadMessages = useCallback(
-        (lim) => {
-            setLoading(true);
+        (lim, isMore = false) => {
+            if (isMore) setLoadingMore(true);
+            else setLoading(true);
             socket.emit('get-messages', { chatId: chat.id, limit: lim });
         },
         [chat.id]
     );
 
     useEffect(() => {
-        loadMessages(limit);
+        limitRef.current = 50;
+        setFetchError(null);
+        loadMessages(50);
 
-        socket.on('messages', ({ chatId, messages: msgs }) => {
+        const handler = ({ chatId, messages: msgs, error }) => {
             if (chatId !== chat.id) return;
-            setMessages(msgs);
+            setMessages(msgs || []);
             setLoading(false);
-        });
+            setLoadingMore(false);
+            setFetchError(error ? `Erreur: ${error}` : null);
+        };
 
-        return () => socket.off('messages');
-    }, [chat.id, loadMessages, limit]);
+        // Safety net: if no response from backend in 35s, unblock the UI
+        const timeoutId = setTimeout(() => {
+            setLoading(false);
+            setLoadingMore(false);
+            setFetchError("Délai dépassé — WhatsApp n'a pas répondu.");
+        }, 35000);
+
+        socket.on('messages', handler);
+
+        return () => {
+            clearTimeout(timeoutId);
+            socket.off('messages', handler);
+        };
+    }, [chat.id, loadMessages]);
 
     useEffect(() => {
-        if (!loading) {
+        if (!loading && !loadingMore) {
             bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
         }
-    }, [messages, loading]);
+    }, [loading]);
 
     const handleLoadMore = () => {
-        const newLimit = limit + 100;
-        setLimit(newLimit);
-        loadMessages(newLimit);
+        const newLimit = limitRef.current + 50;
+        limitRef.current = newLimit;
+        loadMessages(newLimit, true);
     };
 
     const handleSelectStartingPoint = (msgId) => {
@@ -95,8 +115,8 @@ export default function ChatView({ chat, geminiKey, onBack }) {
                     <button
                         onClick={() => setShowAI((p) => !p)}
                         className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg transition font-medium ${showAI
-                                ? 'bg-purple-600 text-white'
-                                : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                            ? 'bg-purple-600 text-white'
+                            : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
                             }`}
                     >
                         <Sparkles className="w-4 h-4" />
@@ -108,19 +128,37 @@ export default function ChatView({ chat, geminiKey, onBack }) {
                 <div className="flex justify-center py-2 border-b border-gray-800 bg-gray-900 flex-shrink-0">
                     <button
                         onClick={handleLoadMore}
-                        disabled={loading}
+                        disabled={loading || loadingMore}
                         className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-white transition disabled:opacity-50"
                     >
-                        <ChevronUp className="w-4 h-4" />
-                        Charger plus de messages anciens
+                        {loadingMore
+                            ? <span className="animate-spin w-3 h-3 border-2 border-gray-400 border-t-transparent rounded-full" />
+                            : <ChevronUp className="w-4 h-4" />}
+                        {loadingMore ? 'Chargement…' : 'Charger plus de messages anciens'}
                     </button>
                 </div>
 
                 {/* Messages */}
                 <div className="flex-1 overflow-y-auto px-4 py-2 space-y-1">
                     {loading ? (
-                        <div className="flex items-center justify-center h-40">
+                        <div className="flex flex-col items-center justify-center h-40 gap-3">
                             <div className="animate-spin w-8 h-8 border-4 border-green-500 border-t-transparent rounded-full" />
+                            <p className="text-xs text-gray-500">Chargement des messages…</p>
+                        </div>
+                    ) : fetchError ? (
+                        <div className="flex flex-col items-center justify-center h-40 gap-3 text-center px-6">
+                            <p className="text-red-400 text-sm font-medium">Impossible de charger les messages</p>
+                            <p className="text-gray-500 text-xs">{fetchError}</p>
+                            <button
+                                onClick={() => { setFetchError(null); setLoading(true); loadMessages(limitRef.current); }}
+                                className="mt-2 px-4 py-1.5 bg-gray-800 hover:bg-gray-700 text-white text-xs rounded-lg transition"
+                            >
+                                Réessayer
+                            </button>
+                        </div>
+                    ) : messages.length === 0 ? (
+                        <div className="flex items-center justify-center h-40">
+                            <p className="text-gray-500 text-sm">Aucun message à afficher.</p>
                         </div>
                     ) : (
                         Object.entries(grouped).map(([date, msgs]) => (
@@ -158,8 +196,8 @@ export default function ChatView({ chat, geminiKey, onBack }) {
 
                                                 <div
                                                     className={`px-3 py-2 rounded-2xl text-sm leading-relaxed transition-all ${msg.fromMe
-                                                            ? 'bg-green-700 text-white rounded-br-sm'
-                                                            : 'bg-gray-800 text-gray-100 rounded-bl-sm'
+                                                        ? 'bg-green-700 text-white rounded-br-sm'
+                                                        : 'bg-gray-800 text-gray-100 rounded-bl-sm'
                                                         } ${isStart ? 'ring-2 ring-green-400' : ''}
                           ${inContext && !isStart ? 'ring-1 ring-green-700/50' : ''}
                           group-hover:ring-1 group-hover:ring-gray-500`}

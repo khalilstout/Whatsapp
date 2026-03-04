@@ -1,16 +1,13 @@
 import { useState } from 'react';
-import { KeyRound, MessageSquare } from 'lucide-react';
+import { KeyRound, MessageSquare, Zap } from 'lucide-react';
 
-export default function SetupScreen({ onStart }) {
+export default function SetupScreen({ onStart, waReady }) {
     const [key, setKey] = useState('');
-    const [loading, setLoading] = useState(false);
 
     const handleSubmit = (e) => {
         e.preventDefault();
         if (!key.trim()) return;
-        setLoading(true);
         onStart(key);
-        // Loading state is reset when QR arrives (parent changes appState)
     };
 
     return (
@@ -48,21 +45,29 @@ export default function SetupScreen({ onStart }) {
 
                     <button
                         type="submit"
-                        disabled={loading || !key.trim()}
+                        disabled={!key.trim()}
                         className="w-full bg-green-600 hover:bg-green-500 disabled:bg-gray-700 disabled:cursor-not-allowed text-white font-semibold py-3 px-6 rounded-lg transition flex items-center justify-center gap-2"
                     >
-                        {loading ? (
-                            <>
-                                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                                Génération du QR code...
-                            </>
-                        ) : (
-                            'Générer le QR Code WhatsApp'
-                        )}
+                        Voir le QR Code WhatsApp
                     </button>
                 </form>
 
-                <p className="text-xs text-gray-600 text-center mt-4">
+                {/* Pre-warm status indicator */}
+                <div className="flex items-center justify-center gap-2 mt-4 text-xs">
+                    {waReady ? (
+                        <>
+                            <Zap className="w-3.5 h-3.5 text-green-400" />
+                            <span className="text-green-400">QR code prêt — connexion instantanée</span>
+                        </>
+                    ) : (
+                        <>
+                            <span className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />
+                            <span className="text-gray-500">Préparation du QR code en arrière-plan...</span>
+                        </>
+                    )}
+                </div>
+
+                <p className="text-xs text-gray-600 text-center mt-2">
                     Votre clé API n'est jamais stockée. Elle est utilisée uniquement pour les requêtes Gemini.
                 </p>
             </div>

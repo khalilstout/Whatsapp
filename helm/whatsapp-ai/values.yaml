@@ -51,7 +51,8 @@ backend:
     timeoutSeconds: 5
     failureThreshold: 3
 
-  nodeSelector: {}
+  nodeSelector:
+    kubernetes.io/hostname: k3s-master
   tolerations: []
   affinity: {}
 
@@ -79,14 +80,23 @@ frontend:
     type: ClusterIP
     port: 80
 
-  nodeSelector: {}
+  nodeSelector:
+    kubernetes.io/hostname: k3s-master
   tolerations: []
   affinity: {}
+
+# ─── Cert-Manager ────────────────────────────────────────────────────────────
+certManager:
+  enabled: true
+  issuer: letsencrypt-prod
+  email: khalil@khalil.dedyn.io   # ← remplace par ton email réel
 
 # ─── Ingress ─────────────────────────────────────────────────────────────────
 ingress:
   enabled: true
   className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
   hosts:
     - host: whatsapp.khalil.dedyn.io
       paths:
@@ -94,7 +104,7 @@ ingress:
           pathType: Prefix
   tls:
     enabled: true
-    secretName: roman-tls-prod
+    secretName: whatsapp-tls-prod
 
 # ─── Cert-Manager ─────────────────────────────────────────────────────────────
 certManager:

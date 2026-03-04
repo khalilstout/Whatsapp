@@ -6,11 +6,8 @@ metadata:
     {{- include "whatsapp-ai.labels" . | nindent 4 }}
     {{- include "whatsapp-ai.frontend.selectorLabels" . | nindent 4 }}
 data:
-  default.conf: |
+  default.conf.tmpl: |
     server {
-        # Fix 1: listen IPv6 explicitement pour que le script init nginx
-        # (10-listen-on-ipv6-by-default.sh) ne tente pas de modifier ce fichier
-        # (le ConfigMap est read-only → crash sans ça)
         listen 80;
         listen [::]:80;
         server_name _;
@@ -18,10 +15,14 @@ data:
         root /usr/share/nginx/html;
         index index.html;
 
-        # Full FQDN — résolvable par CoreDNS dès que le service K8s existe,
-        # sans avoir besoin de la directive resolver (qui requiert une IP, pas un hostname)
+        # __RESOLVER__ est remplacé au démarrage du container par l'IP de
+        # CoreDNS lue depuis /etc/resolv.conf (awk sur le nameserver).
+        # La variable $backend diffère la résolution DNS à chaque requête.
+        resolver __RESOLVER__ valid=30s ipv6=off;
+        set $backend "http://{{ include "whatsapp-ai.backend.name" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.backend.service.port }}";
+
         location /socket.io/ {
-            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.backend.service.port }};
+            proxy_pass $backend;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
@@ -31,14 +32,12 @@ data:
             proxy_read_timeout 86400;
         }
 
-        # Proxy REST API calls
         location /api/ {
-            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.backend.service.port }};
+            proxy_pass $backend;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
         }
 
-        # SPA fallback
         location / {
             try_files $uri $uri/ /index.html;
         }

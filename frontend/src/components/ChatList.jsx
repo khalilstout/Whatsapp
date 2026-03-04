@@ -35,7 +35,7 @@ export default function ChatList({ onSelectChat }) {
     return (
         <div className="flex-1 flex flex-col max-w-lg mx-auto w-full border-x border-gray-800">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 bg-gray-900">
-                <h2 className="font-semibold text-white">Conversations récentes</h2>
+                <h2 className="font-semibold text-white">5 dernières conversations</h2>
                 <button
                     onClick={loadChats}
                     disabled={loading}
