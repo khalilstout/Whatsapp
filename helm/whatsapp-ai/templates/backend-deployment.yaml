@@ -61,14 +61,32 @@ spec:
             periodSeconds: {{ .Values.backend.readinessProbe.periodSeconds }}
             timeoutSeconds: {{ .Values.backend.readinessProbe.timeoutSeconds }}
             failureThreshold: {{ .Values.backend.readinessProbe.failureThreshold }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: {{ .Values.backend.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.backend.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.backend.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.backend.startupProbe.failureThreshold }}
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
           volumeMounts:
             # Chromium needs a large /dev/shm — mount a Memory-backed tmpfs
             - name: dshm
               mountPath: /dev/shm
+            # Persistent named-session auth data (LocalAuth + registry.json)
+            {{- if .Values.persistence.enabled }}
+            - name: wwebjs-auth
+              mountPath: /app/.wwebjs_auth
+            {{- end }}
       volumes:
         - name: dshm
           emptyDir:
             medium: Memory
             sizeLimit: {{ .Values.backend.shmSize }}
+        {{- if .Values.persistence.enabled }}
+        - name: wwebjs-auth
+          persistentVolumeClaim:
+            claimName: {{ include "whatsapp-ai.backend.name" . }}-auth
+        {{- end }}

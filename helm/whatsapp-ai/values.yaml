@@ -38,15 +38,22 @@ backend:
     type: ClusterIP
     port: 3001
 
+  # Startup probe: Chromium takes up to 60 s to start, don't kill pod too early
+  startupProbe:
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 12   # 12 × 10 s = 2 min max before marking failed
+
   # Liveness / Readiness probes hit /health
   livenessProbe:
-    initialDelaySeconds: 30
+    initialDelaySeconds: 0   # startupProbe gates this
     periodSeconds: 30
     timeoutSeconds: 10
     failureThreshold: 3
 
   readinessProbe:
-    initialDelaySeconds: 20
+    initialDelaySeconds: 0
     periodSeconds: 15
     timeoutSeconds: 5
     failureThreshold: 3
@@ -85,11 +92,15 @@ frontend:
   tolerations: []
   affinity: {}
 
-# ─── Cert-Manager ────────────────────────────────────────────────────────────
-certManager:
+# ─── Session persistence ──────────────────────────────────────────────────────
+# Persistent volume for /app/.wwebjs_auth — stores LocalAuth session data and
+# the sessions registry (registry.json). Without this, QR must be re-scanned
+# every time the backend pod restarts.
+persistence:
   enabled: true
-  issuer: letsencrypt-prod
-  email: khalil@khalil.dedyn.io   # ← remplace par ton email réel
+  storageClass: ""        # leave empty to use cluster default StorageClass
+  accessMode: ReadWriteOnce
+  size: 500Mi
 
 # ─── Ingress ─────────────────────────────────────────────────────────────────
 ingress:
@@ -97,6 +108,9 @@ ingress:
   className: "nginx"
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # Required for Socket.IO long-polling / websocket upgrades
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "86400"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "86400"
   hosts:
     - host: whatsapp.khalil.dedyn.io
       paths:

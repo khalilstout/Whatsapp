@@ -1,13 +1,18 @@
-🟢 WhatsApp AI Analyzer déployé avec succès !
+WhatsApp AI Analyzer deploye avec succes !
 
-Release : {{ .Release.Name }}
-Namespace : {{ .Release.Namespace }}
+Release    : {{ .Release.Name }}
+Namespace  : {{ .Release.Namespace }}
+Version    : {{ .Chart.AppVersion }}
+
+Session persistence : {{ if .Values.persistence.enabled }}ACTIVE (PVC {{ include "whatsapp-ai.backend.name" . }}-auth, {{ .Values.persistence.size }}){{ else }}DESACTIVE (QR requis apres chaque redemarrage){{ end }}
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
- Accéder à l'application
+ Acceder a l'application
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 {{- if .Values.ingress.enabled }}
-  URL : http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+  {{- range .Values.ingress.hosts }}
+  URL : http{{ if $.Values.ingress.tls.enabled }}s{{ end }}://{{ .host }}
+  {{- end }}
 {{- else if eq .Values.frontend.service.type "LoadBalancer" }}
   En attente de l'IP externe LoadBalancer :
 

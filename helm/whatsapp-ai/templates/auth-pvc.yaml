@@ -1,0 +1,24 @@
+{{- if .Values.persistence.enabled }}
+# PersistentVolumeClaim for /app/.wwebjs_auth
+# Stores LocalAuth session data and the sessions registry (registry.json).
+# Without this, QR must be re-scanned every time the backend pod restarts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "whatsapp-ai.backend.name" . }}-auth
+  labels:
+    {{- include "whatsapp-ai.labels" . | nindent 4 }}
+    {{- include "whatsapp-ai.backend.selectorLabels" . | nindent 4 }}
+  annotations:
+    # Keep the PVC when the Helm release is deleted to avoid losing session data
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - {{ .Values.persistence.accessMode }}
+  {{- if .Values.persistence.storageClass }}
+  storageClassName: {{ .Values.persistence.storageClass }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.size }}
+{{- end }}
