@@ -1,0 +1,45 @@
+🟢 WhatsApp AI Analyzer déployé avec succès !
+
+Release : {{ .Release.Name }}
+Namespace : {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Accéder à l'application
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+{{- if .Values.ingress.enabled }}
+  URL : http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}
+{{- else if eq .Values.frontend.service.type "LoadBalancer" }}
+  En attente de l'IP externe LoadBalancer :
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} \
+    {{ include "whatsapp-ai.frontend.name" . }} \
+    -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo "http://$SERVICE_IP"
+{{- else if eq .Values.frontend.service.type "NodePort" }}
+  export NODE_PORT=$(kubectl get svc --namespace {{ .Release.Namespace }} \
+    {{ include "whatsapp-ai.frontend.name" . }} \
+    -o jsonpath='{.spec.ports[0].nodePort}')
+  export NODE_IP=$(kubectl get nodes -o jsonpath='{.items[0].status.addresses[0].address}')
+  echo "http://$NODE_IP:$NODE_PORT"
+{{- else }}
+  # Port-forward (ClusterIP) :
+  kubectl port-forward --namespace {{ .Release.Namespace }} \
+    svc/{{ include "whatsapp-ai.frontend.name" . }} 8080:80
+  echo "http://localhost:8080"
+{{- end }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Vérifier l'état des pods
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  kubectl get pods --namespace {{ .Release.Namespace }} \
+    -l app.kubernetes.io/instance={{ .Release.Name }}
+
+  kubectl logs --namespace {{ .Release.Namespace }} \
+    -l app.kubernetes.io/name={{ include "whatsapp-ai.name" . }}-backend -f
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Health check backend
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  kubectl port-forward --namespace {{ .Release.Namespace }} \
+    svc/{{ include "whatsapp-ai.backend.name" . }} 3001:3001
+  curl http://localhost:3001/health

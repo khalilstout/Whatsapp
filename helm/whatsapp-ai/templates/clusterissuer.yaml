@@ -1,0 +1,18 @@
+{{- if and .Values.ingress.enabled .Values.certManager.enabled }}
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: {{ .Values.certManager.issuer }}
+  labels:
+    {{- include "whatsapp-ai.labels" . | nindent 4 }}
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: {{ .Values.certManager.email | quote }}
+    privateKeySecretRef:
+      name: {{ .Values.certManager.issuer }}-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: {{ .Values.ingress.className }}
+{{- end }}

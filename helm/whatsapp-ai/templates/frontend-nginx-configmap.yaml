@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "whatsapp-ai.frontend.name" . }}-nginx
+  labels:
+    {{- include "whatsapp-ai.labels" . | nindent 4 }}
+    {{- include "whatsapp-ai.frontend.selectorLabels" . | nindent 4 }}
+data:
+  default.conf: |
+    server {
+        listen 80;
+        server_name _;
+
+        root /usr/share/nginx/html;
+        index index.html;
+
+        # Proxy Socket.IO WebSocket traffic to the backend Service
+        location /socket.io/ {
+            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}:{{ .Values.backend.service.port }};
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_cache_bypass $http_upgrade;
+            proxy_read_timeout 86400;
+        }
+
+        # Proxy REST API calls
+        location /api/ {
+            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}:{{ .Values.backend.service.port }};
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        # SPA fallback
+        location / {
+            try_files $uri $uri/ /index.html;
+        }
+    }
