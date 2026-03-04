@@ -8,15 +8,24 @@ metadata:
 data:
   default.conf: |
     server {
+        # Fix 1: listen IPv6 explicitement pour que le script init nginx
+        # (10-listen-on-ipv6-by-default.sh) ne tente pas de modifier ce fichier
+        # (le ConfigMap est read-only → crash sans ça)
         listen 80;
+        listen [::]:80;
         server_name _;
 
         root /usr/share/nginx/html;
         index index.html;
 
+        # Fix 2: resolver kube-dns + variable pour que nginx ne plante pas
+        # au démarrage si le backend n'est pas encore résolvable (lazy resolution)
+        resolver kube-dns.kube-system.svc.cluster.local valid=10s ipv6=off;
+        set $backend "http://{{ include "whatsapp-ai.backend.name" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.backend.service.port }}";
+
         # Proxy Socket.IO WebSocket traffic to the backend Service
         location /socket.io/ {
-            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}:{{ .Values.backend.service.port }};
+            proxy_pass $backend;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
@@ -28,7 +37,7 @@ data:
 
         # Proxy REST API calls
         location /api/ {
-            proxy_pass http://{{ include "whatsapp-ai.backend.name" . }}:{{ .Values.backend.service.port }};
+            proxy_pass $backend;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
         }
