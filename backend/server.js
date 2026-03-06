@@ -163,6 +163,18 @@ app.get('/api/db-stats', (_req, res) => {
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── API: historique complet en HTTP (évite la limite de taille socket.io) ────
+app.get('/api/history', (_req, res) => {
+    try {
+        const msgs = getStoredMessages();
+        log(`[HTTP] GET /api/history → ${msgs.length} messages`);
+        res.json({ messages: msgs, count: msgs.length, chatId: TARGET_CHAT_ID });
+    } catch (err) {
+        logE('GET /api/history error:', err.message);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 function broadcast(sessionName, event, data) {
     const entry = waClients.get(sessionName);
     if (!entry) return;

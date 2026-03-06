@@ -134,10 +134,22 @@ export default function App() {
         socket.emit('refresh-contact');
     }, []);
 
-    const handleLoadAll = useCallback(() => {
+    const handleLoadAll = useCallback(async () => {
         setSyncStatus({ status: 'db', message: "Chargement de tout l'historique\u2026" });
-        setSyncLog([]);
-        socket.emit('load-all-history');
+        setSyncLog([{ text: '📂 Chargement en cours…', ts: Date.now() }]);
+        try {
+            const res = await fetch('/api/history');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const { messages: msgs, count } = await res.json();
+            setMessages(msgs);
+            setContactFound(msgs.length > 0);
+            setScrollMode('top');
+            setSyncStatus({ status: 'db', message: `📂 ${count} messages chargés depuis la base de données` });
+            setSyncLog([{ text: `✅ ${count} messages chargés`, ts: Date.now() }]);
+            setTimeout(() => { setSyncStatus(null); setSyncLog([]); }, 4000);
+        } catch (err) {
+            setSyncStatus({ status: 'error', message: `Erreur chargement: ${err.message}` });
+        }
     }, []);
 
     const handleBackToSessions = useCallback(() => {
