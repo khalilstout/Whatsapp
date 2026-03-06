@@ -29,8 +29,8 @@ if ! kubectl get pvc "${PVC_NAME}" -n "${NAMESPACE}" &>/dev/null; then
     helm upgrade --install whatsapp \
         "$(cd "$(dirname "$0")/helm/whatsapp-ai" && pwd)" \
         --namespace "${NAMESPACE}" \
-        --timeout 2m \
-        --wait=false  # don't wait — backend needs session data to start
+        --timeout 2m
+        # no --wait: backend needs session data to start, PVC creation is enough
     echo "Waiting 15s for PVC to be created..."
     sleep 15
 fi
