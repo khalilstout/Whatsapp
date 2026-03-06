@@ -1,0 +1,50 @@
+# ── Données sensibles / session WhatsApp ──────────────────────────────────────
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Fichiers temporaires / tests ──────────────────────────────────────────────
+test_output.txt
+redeploy.txt
+import_chat.py
+_chat*.txt
+/tmp/
+
+# ── Dépendances Node.js ───────────────────────────────────────────────────────
+node_modules/
+backend/node_modules/
+frontend/node_modules/
+
+# ── Build frontend ────────────────────────────────────────────────────────────
+frontend/dist/
+frontend/.vite/
+
+# ── Variables d'environnement ─────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Docker ────────────────────────────────────────────────────────────────────
+# (docker-compose.yml est commité volontairement)
+
+# ── Helm ──────────────────────────────────────────────────────────────────────
+helm/*/charts/
+helm/*/Chart.lock
+*.tgz
+
+# ── Clés / secrets ────────────────────────────────────────────────────────────
+*.pem
+*.key
+*.p12
+*.pfx
