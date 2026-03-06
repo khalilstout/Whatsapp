@@ -2,18 +2,26 @@ import { useState, useEffect, useCallback } from 'react';
 import socket from './socket';
 import SessionsScreen from './components/SessionsScreen';
 import QRScreen from './components/QRScreen';
-import ChatList from './components/ChatList';
-import ChatView from './components/ChatView';
+import ContactView from './components/ContactView';
+
+const TARGET_PHONE = '+33648144945';
 
 // App states: 'sessions' | 'connecting' | 'qr' | 'authenticated' | 'ready'
 export default function App() {
     const [appState, setAppState] = useState('sessions');
     const [geminiKey, setGeminiKey] = useState('');
     const [qrData, setQrData] = useState(null);
-    const [selectedChat, setSelectedChat] = useState(null);
     const [error, setError] = useState(null);
     const [connected, setConnected] = useState(socket.connected);
     const [currentSession, setCurrentSession] = useState(null);
+
+    // Contact conversation state
+    const [messages, setMessages] = useState([]);
+    const [chatName, setChatName] = useState(TARGET_PHONE);
+    const [contactFound, setContactFound] = useState(null); // null | true | false
+    const [syncStatus, setSyncStatus] = useState(null); // { status, message }
+    const [syncLog, setSyncLog] = useState([]); // accumulated progress lines
+    const [scrollMode, setScrollMode] = useState('bottom'); // 'bottom' | 'top'
 
     useEffect(() => {
         const onConnect = () => setConnected(true);
@@ -33,15 +41,49 @@ export default function App() {
             } else if (status === 'ready') {
                 setAppState('ready');
                 setQrData(null);
+                // Charger immédiatement la conversation cible
+                socket.emit('connect-to-contact');
             } else if (status === 'disconnected' || status === 'auth_failure') {
-                // Session dropped — go back to sessions list so user can reconnect
                 setAppState('sessions');
                 setQrData(null);
-                setSelectedChat(null);
                 setCurrentSession(null);
-            } else if (status === 'initializing' || status === 'qr') {
-                // Already handled; ignore
+                setMessages([]);
+                setContactFound(null);
             }
+        });
+
+        // Messages de la conversation (depuis DB ou WA)
+        socket.on('contact-messages', ({ found, fromDb, messages: msgs, newCount, chatName: cn, scrollTop }) => {
+            setContactFound(found);
+            if (cn) setChatName(cn);
+            if (msgs) setMessages(msgs);
+            if (scrollTop) {
+                setScrollMode('top');
+            } else if (!fromDb) {
+                setScrollMode('bottom');
+            }
+            if (fromDb && !scrollTop) {
+                setSyncStatus({ status: 'db', message: `${msgs.length} messages chargés (base de données)` });
+            } else if (!fromDb) {
+                setSyncStatus({ status: 'done', message: `Synchronisé — ${newCount} nouveau(x) message(s)` });
+                // Garder le log visible 6s puis le vider
+                setTimeout(() => { setSyncStatus(null); setSyncLog([]); }, 6000);
+            }
+        });
+
+        socket.on('sync-clear', () => {
+            setSyncStatus(null);
+            setSyncLog([]);
+        });
+
+        socket.on('contact-not-found', ({ error: e }) => {
+            setContactFound(false);
+            setSyncStatus({ status: 'error', message: `Contact introuvable : ${e}` });
+        });
+
+        socket.on('sync-progress', ({ status: s, message: m }) => {
+            setSyncStatus({ status: s, message: m });
+            setSyncLog(prev => [...prev.slice(-50), { text: m, ts: Date.now() }]);
         });
 
         socket.on('error', ({ message }) => {
@@ -54,41 +96,61 @@ export default function App() {
             socket.off('disconnect', onDisconnect);
             socket.off('qr');
             socket.off('wa-status');
+            socket.off('contact-messages');
+            socket.off('contact-not-found');
+            socket.off('sync-progress');
+            socket.off('sync-clear');
             socket.off('error');
         };
     }, []);
 
-    // Called by SessionsScreen when user clicks "Ouvrir" on an existing session
     const handleConnect = useCallback((sessionName, key) => {
         setGeminiKey(key);
         setCurrentSession(sessionName);
         setAppState('connecting');
         setQrData(null);
-        setSelectedChat(null);
+        setMessages([]);
+        setContactFound(null);
+        setSyncStatus(null);
+        setSyncLog([]);
         socket.emit('connect-session', { name: sessionName });
     }, []);
 
-    // Called by SessionsScreen when user creates a new named session
     const handleCreateNew = useCallback((sessionName, key) => {
         setGeminiKey(key);
         setCurrentSession(sessionName);
         setAppState('connecting');
         setQrData(null);
-        setSelectedChat(null);
+        setMessages([]);
+        setContactFound(null);
+        setSyncStatus(null);
         socket.emit('create-session', { name: sessionName });
     }, []);
 
-    const handleSelectChat = useCallback((chat) => setSelectedChat(chat), []);
-    const handleBack = useCallback(() => setSelectedChat(null), []);
+    const handleRefresh = useCallback(() => {
+        setScrollMode('bottom');
+        setSyncStatus({ status: 'fetching', message: 'Récupération nouveaux messages…' });
+        setSyncLog([{ text: '🔄 Rafraîchissement lancé…', ts: Date.now() }]);
+        socket.emit('refresh-contact');
+    }, []);
+
+    const handleLoadAll = useCallback(() => {
+        setSyncStatus({ status: 'db', message: "Chargement de tout l'historique\u2026" });
+        setSyncLog([]);
+        socket.emit('load-all-history');
+    }, []);
+
     const handleBackToSessions = useCallback(() => {
         setAppState('sessions');
-        setSelectedChat(null);
         setCurrentSession(null);
         setQrData(null);
+        setMessages([]);
+        setContactFound(null);
+        setSyncStatus(null);
     }, []);
 
     return (
-        <div className="min-h-screen flex flex-col">
+        <div className="h-screen flex flex-col overflow-hidden">
             {/* Top bar */}
             <header className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0">
                 <div className="flex items-center gap-2">
@@ -135,7 +197,6 @@ export default function App() {
                     </div>
                 )}
 
-                {/* QR screen — shown either after create-session or connect-session when auth is missing */}
                 {(appState === 'qr' || (appState === 'connecting' && qrData)) && (
                     <QRScreen qrData={qrData} sessionName={currentSession} />
                 )}
@@ -146,28 +207,33 @@ export default function App() {
                             <div className="relative w-16 h-16 mx-auto">
                                 <div className="absolute inset-0 rounded-full bg-green-500/20 animate-ping" />
                                 <div className="relative w-16 h-16 bg-green-600 rounded-full flex items-center justify-center">
-                                    <svg className="w-8 h-8 text-white" fill="currentColor" viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" /></svg>
+                                    <svg className="w-8 h-8 text-white" fill="currentColor" viewBox="0 0 24 24">
+                                        <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z" />
+                                    </svg>
                                 </div>
                             </div>
                             <div>
                                 <p className="text-white font-semibold">Connexion établie !</p>
                                 <p className="text-gray-400 text-sm mt-1">Synchronisation de WhatsApp en cours…</p>
                             </div>
-                            <div className="flex justify-center gap-1">
-                                <span className="w-2 h-2 bg-green-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                                <span className="w-2 h-2 bg-green-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                                <span className="w-2 h-2 bg-green-500 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                            </div>
                         </div>
                     </div>
                 )}
 
                 {appState === 'ready' && (
-                    selectedChat ? (
-                        <ChatView chat={selectedChat} geminiKey={geminiKey} onBack={handleBack} />
-                    ) : (
-                        <ChatList onSelectChat={handleSelectChat} />
-                    )
+                    <ContactView
+                        chatName={chatName}
+                        targetPhone={TARGET_PHONE}
+                        messages={messages}
+                        contactFound={contactFound}
+                        syncStatus={syncStatus}
+                        syncLog={syncLog}
+                        geminiKey={geminiKey}
+                        onRefresh={handleRefresh}
+                        onLoadAll={handleLoadAll}
+                        scrollMode={scrollMode}
+                        onScrollModeReset={() => setScrollMode('bottom')}
+                    />
                 )}
             </main>
         </div>

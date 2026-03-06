@@ -1,6 +1,6 @@
 # ─── Global ───────────────────────────────────────────────────────────────────
 nameOverride: ""
-fullnameOverride: ""
+fullnameOverride: "whatsapp-ai"  # force predictable resource names
 
 # GitHub Container Registry pull secret (créé via kubectl, voir README)
 imagePullSecrets:

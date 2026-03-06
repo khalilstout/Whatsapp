@@ -69,7 +69,7 @@ export default function AIPanel({ contextMessages, geminiKey, chatName, onClose 
     };
 
     return (
-        <div className="w-1/2 flex flex-col bg-gray-950 border-l border-gray-800">
+        <div className="w-full flex flex-col bg-gray-950 border-l border-gray-800">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 flex-shrink-0">
                 <div className="flex items-center gap-2">

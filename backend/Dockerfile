@@ -34,6 +34,9 @@ RUN apt-get update && apt-get install -y \
     libxtst6 \
     ca-certificates \
     wget \
+    python3 \
+    make \
+    g++ \
     --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 

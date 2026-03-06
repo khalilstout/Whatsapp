@@ -14,7 +14,8 @@ services:
     mem_limit: 2g
     memswap_limit: 2g
     volumes:
-      - wwebjs_auth:/app/.wwebjs_auth
+      - ./data:/app/.wwebjs_auth
+      - ./logs:/app/logs
     ports:
       - "3001:3001"
     networks:
@@ -42,6 +43,3 @@ services:
 networks:
   app-network:
     driver: bridge
-
-volumes:
-  wwebjs_auth:

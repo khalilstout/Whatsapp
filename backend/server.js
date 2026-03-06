@@ -9,6 +9,97 @@ const qrcode = require('qrcode');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const fs = require('fs');
 const path = require('path');
+const Database = require('better-sqlite3');
+
+// ─── Logging vers fichier ──────────────────────────────────────────────────────
+const LOGS_DIR = '/app/logs';
+const LOG_FILE = path.join(LOGS_DIR, 'output.log');
+
+try { fs.mkdirSync(LOGS_DIR, { recursive: true }); } catch (_) { }
+
+function writeLog(level, ...args) {
+    const ts = new Date().toISOString();
+    const msg = args.map(a => {
+        if (a instanceof Error) return a.stack || a.message;
+        if (typeof a === 'object') return JSON.stringify(a);
+        return String(a);
+    }).join(' ');
+    const line = `[${ts}] [${level}] ${msg}\n`;
+    try { fs.appendFileSync(LOG_FILE, line); } catch (_) { }
+    process.stdout.write(line);
+}
+
+const log = (...a) => writeLog('INFO', ...a);
+const logW = (...a) => writeLog('WARN', ...a);
+const logE = (...a) => writeLog('ERROR', ...a);
+console.log = log;
+console.warn = logW;
+console.error = logE;
+console.info = log;
+
+// ─── Configuration ────────────────────────────────────────────────────────────
+const TARGET_PHONE = '33648144945';
+const TARGET_CHAT_ID = `${TARGET_PHONE}@c.us`;
+
+// ─── SQLite database ──────────────────────────────────────────────────────────
+const AUTH_DATA_PATH = '/app/.wwebjs_auth';
+const SESSIONS_FILE = path.join(AUTH_DATA_PATH, 'registry.json');
+const DB_PATH = path.join(AUTH_DATA_PATH, 'messages.db');
+
+let db;
+try {
+    fs.mkdirSync(AUTH_DATA_PATH, { recursive: true });
+    db = new Database(DB_PATH);
+    db.exec(`
+        CREATE TABLE IF NOT EXISTS messages (
+            id        TEXT PRIMARY KEY,
+            chat_id   TEXT    NOT NULL,
+            body      TEXT    NOT NULL,
+            from_me   INTEGER NOT NULL DEFAULT 0,
+            author    TEXT    DEFAULT '',
+            timestamp INTEGER NOT NULL,
+            synced_at INTEGER DEFAULT (strftime('%s','now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_ts ON messages(chat_id, timestamp);
+    `);
+    log('SQLite OK:', DB_PATH);
+} catch (err) {
+    logE('SQLite init error:', err);
+}
+
+const stmtInsert = db.prepare(`
+    INSERT OR IGNORE INTO messages (id, chat_id, body, from_me, author, timestamp)
+    VALUES (@id, @chat_id, @body, @from_me, @author, @timestamp)
+`);
+const insertMany = db.transaction((msgs) => {
+    let count = 0;
+    for (const m of msgs) {
+        const id = String(m.id ?? '');
+        const body = String(m.body ?? '');
+        if (!id || !body) continue; // ignorer les msgs invalides
+        const info = stmtInsert.run({
+            id,
+            chat_id: TARGET_CHAT_ID,
+            body,
+            from_me: (m.fromMe === true || m.fromMe === 1) ? 1 : 0,
+            author: String(m.author ?? ''),
+            timestamp: Number(m.timestamp) || 0,
+        });
+        count += info.changes;
+    }
+    return count;
+});
+
+function getStoredMessages() {
+    return db.prepare(
+        'SELECT id, chat_id, body, from_me, author, timestamp FROM messages WHERE chat_id = ? ORDER BY timestamp ASC'
+    ).all(TARGET_CHAT_ID).map(m => ({ ...m, fromMe: m.from_me === 1 }));
+}
+
+function getLastTimestamp() {
+    const row = db.prepare('SELECT MAX(timestamp) as ts FROM messages WHERE chat_id = ?').get(TARGET_CHAT_ID);
+    return row?.ts || 0;
+}
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 const app = express();
@@ -21,18 +112,11 @@ const io = new Server(httpServer, {
     pingTimeout: 60000,
 });
 
-// ─── Persistent Session Registry ──────────────────────────────────────────────
-// Sessions are identified by a stable user-chosen name, NOT the socket.id.
-// This means QR is only scanned once; subsequent browser visits reuse auth.
-// Registry format: [{ name: string, createdAt: number }]
-const AUTH_DATA_PATH = '/app/.wwebjs_auth';
-const SESSIONS_FILE = path.join(AUTH_DATA_PATH, 'registry.json');
-
+// ─── Sessions Registry ────────────────────────────────────────────────────────
 function loadRegistry() {
     try {
-        if (fs.existsSync(SESSIONS_FILE)) {
+        if (fs.existsSync(SESSIONS_FILE))
             return JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf8'));
-        }
     } catch (_) { }
     return [];
 }
@@ -41,21 +125,44 @@ function saveRegistry(registry) {
     try {
         fs.mkdirSync(AUTH_DATA_PATH, { recursive: true });
         fs.writeFileSync(SESSIONS_FILE, JSON.stringify(registry, null, 2));
-    } catch (err) {
-        console.error('Failed to save registry:', err.message);
-    }
+    } catch (err) { logE('Failed to save registry:', err.message); }
 }
 
-// ─── In-Memory WA Clients ─────────────────────────────────────────────────────
-// Map<sessionName, { client: Client, status: string, listeners: Set<socketId> }>
-// Clients live independently of socket connections; they are never destroyed on
-// socket disconnect so the user does not have to rescan the QR code.
+// ─── WA Clients ───────────────────────────────────────────────────────────────
 const waClients = new Map();
 
-// ─── Health Check ─────────────────────────────────────────────────────────────
+// ─── Health ───────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true, clients: waClients.size }));
 
-// ─── Broadcast an event to every socket subscribed to a session ───────────────
+// ─── API: lire le fichier de log depuis le navigateur ─────────────────────────
+app.get('/logs', (_req, res) => {
+    try {
+        const content = fs.readFileSync(LOG_FILE, 'utf8');
+        res.type('text/plain').send(content);
+    } catch (_) { res.type('text/plain').send('(aucun log encore)'); }
+});
+
+// Accessible via /api/logs (proxied par nginx)
+app.get('/api/logs', (_req, res) => {
+    try {
+        const content = fs.readFileSync(LOG_FILE, 'utf8');
+        res.type('text/plain').send(content);
+    } catch (_) { res.type('text/plain').send('(aucun log encore)'); }
+});
+
+app.get('/api/db-stats', (_req, res) => {
+    try {
+        const count = db.prepare('SELECT COUNT(*) as cnt FROM messages WHERE chat_id = ?').get(TARGET_CHAT_ID);
+        const oldest = db.prepare('SELECT MIN(timestamp) as ts FROM messages WHERE chat_id = ?').get(TARGET_CHAT_ID);
+        const newest = db.prepare('SELECT MAX(timestamp) as ts FROM messages WHERE chat_id = ?').get(TARGET_CHAT_ID);
+        res.json({
+            total: count.cnt,
+            oldest: oldest.ts ? new Date(oldest.ts * 1000).toISOString() : null,
+            newest: newest.ts ? new Date(newest.ts * 1000).toISOString() : null,
+        });
+    } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 function broadcast(sessionName, event, data) {
     const entry = waClients.get(sessionName);
     if (!entry) return;
@@ -65,35 +172,24 @@ function broadcast(sessionName, event, data) {
     }
 }
 
-// ─── Destroy a WA client safely ───────────────────────────────────────────────
 async function destroyClient(sessionName) {
     const entry = waClients.get(sessionName);
     if (!entry) return;
     try { await entry.client.destroy(); } catch (_) { }
     waClients.delete(sessionName);
-    console.log(`[${sessionName}] Client destroyed.`);
+    log(`[${sessionName}] Client détruit.`);
 }
 
-// ─── Create (or return existing) WA client for a session name ─────────────────
 async function getOrCreateClient(sessionName) {
-    if (waClients.has(sessionName)) {
-        return waClients.get(sessionName);
-    }
+    if (waClients.has(sessionName)) return waClients.get(sessionName);
 
     const client = new Client({
         authStrategy: new LocalAuth({ clientId: sessionName, dataPath: AUTH_DATA_PATH }),
         puppeteer: {
             headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-            ],
+            args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas', '--no-first-run', '--no-zygote', '--disable-gpu'],
         },
     });
 
@@ -105,22 +201,20 @@ async function getOrCreateClient(sessionName) {
         try {
             const url = await qrcode.toDataURL(qr);
             broadcast(sessionName, 'qr', url);
-            console.log(`[${sessionName}] QR sent.`);
-        } catch (err) {
-            broadcast(sessionName, 'error', { message: 'Failed to generate QR code.' });
-        }
+            log(`[${sessionName}] QR envoyé.`);
+        } catch (err) { broadcast(sessionName, 'error', { message: 'Échec génération QR code.' }); }
     });
 
     client.on('authenticated', () => {
         entry.status = 'authenticated';
         broadcast(sessionName, 'wa-status', { status: 'authenticated' });
-        console.log(`[${sessionName}] Authenticated.`);
+        log(`[${sessionName}] Authentifié.`);
     });
 
     client.on('ready', () => {
         entry.status = 'ready';
         broadcast(sessionName, 'wa-status', { status: 'ready' });
-        console.log(`[${sessionName}] Ready.`);
+        log(`[${sessionName}] Prêt.`);
     });
 
     client.on('auth_failure', (msg) => {
@@ -134,261 +228,363 @@ async function getOrCreateClient(sessionName) {
         destroyClient(sessionName);
     });
 
-    // Initialize in background so caller is not blocked waiting for Chromium
+    // Supprimer les fichiers de verrou Chromium laissés par un container précédent
+    try {
+        const sessionDir = path.join(AUTH_DATA_PATH, `wwebjs_auth_${sessionName}`);
+        for (const lockFile of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+            const p = path.join(sessionDir, lockFile);
+            if (fs.existsSync(p)) {
+                fs.unlinkSync(p);
+                log(`[${sessionName}] Verrou Chromium supprimé : ${lockFile}`);
+            }
+        }
+    } catch (_) { }
+
     client.initialize().catch((err) => {
-        console.error(`[${sessionName}] Initialize error:`, err.message);
-        broadcast(sessionName, 'error', { message: 'Failed to start WhatsApp client.' });
+        logE(`[${sessionName}] Initialize error:`, err.message);
+        broadcast(sessionName, 'error', { message: 'Échec démarrage client WhatsApp.' });
         destroyClient(sessionName);
     });
 
     return entry;
 }
 
-// ─── Socket.IO ────────────────────────────────────────────────────────────────
+// ─── Sync messages du contact cible ───────────────────────────────────────────
+function emitProgress(socket, message, extra = {}) {
+    log(`[SYNC] ${message}`);
+    socket.emit('sync-progress', { status: 'fetching', message, ...extra });
+}
+
+async function syncContactMessages(entry, socket, onlyNew) {
+    const lastTs = onlyNew ? getLastTimestamp() : 0;
+    log(`syncContactMessages onlyNew=${onlyNew} lastTs=${lastTs}`);
+
+    // ── Étape 1 : vérifier que le chat existe ─────────────────────────────────
+    emitProgress(socket, '🔍 Recherche du contact dans WhatsApp…');
+
+    const chatInfo = await entry.client.pupPage.evaluate((chatId) => {
+        const chat = window.Store.Chat.get(chatId);
+        if (!chat) return { ok: false, error: `Chat ${chatId} introuvable dans le store.` };
+        return {
+            ok: true,
+            name: chat.name || chat.formattedTitle || chatId,
+            totalInMemory: chat.msgs.length,
+        };
+    }, TARGET_CHAT_ID);
+
+    if (!chatInfo || !chatInfo.ok) {
+        // ── Fallback via getChatById ──────────────────────────────────────────
+        logW('Store read failed:', chatInfo?.error, '— fallback fetchMessages');
+        emitProgress(socket, '⚠️ Store indisponible, utilisation de l\'API WhatsApp…');
+        try {
+            const chat = await entry.client.getChatById(TARGET_CHAT_ID);
+            emitProgress(socket, `✅ Chat trouvé : ${chat.name || TARGET_PHONE} — récupération des messages…`);
+            const raw = await chat.fetchMessages({ limit: 500 });
+            emitProgress(socket, `📥 ${raw.length} messages récupérés, filtrage des textes…`);
+            const textOnly = raw.filter(m => m.type === 'chat' && m.body?.trim() && m.timestamp > lastTs);
+            emitProgress(socket, `📝 ${textOnly.length} messages texte trouvés, enregistrement en base…`);
+            const mapped = textOnly.map(m => ({
+                id: m.id._serialized, body: m.body, fromMe: m.fromMe,
+                author: m.author || m.from || '', timestamp: m.timestamp,
+            }));
+            const saved = insertMany(mapped);
+            emitProgress(socket, `💾 ${saved} nouveau(x) message(s) enregistré(s) en base de données.`);
+            log(`Fallback: ${saved} nouveaux msgs sauvegardés`);
+            socket.emit('contact-messages', {
+                found: true, fromDb: false,
+                messages: getStoredMessages(),
+                newCount: saved, chatName: chat.name || TARGET_PHONE,
+            });
+        } catch (fe) {
+            socket.emit('contact-not-found', { error: fe.message });
+        }
+        return;
+    }
+
+    emitProgress(socket, `✅ Contact trouvé : ${chatInfo.name} (${chatInfo.totalInMemory} msgs en mémoire)`);
+
+    // ── Étape 2 : charger toutes les pages (max 200) ──────────────────────────
+    emitProgress(socket, `📄 Chargement des pages de messages…`);
+    let totalPagesLoaded = 0;
+    const MAX_PAGES = 200;
+
+    for (let i = 0; i < MAX_PAGES; i++) {
+        const pageResult = await entry.client.pupPage.evaluate(async (chatId) => {
+            const chat = window.Store.Chat.get(chatId);
+            if (!chat) return { done: true, count: 0, total: 0 };
+            try {
+                const loaded = await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
+                return { done: !loaded || loaded.length === 0, count: loaded ? loaded.length : 0, total: chat.msgs.length };
+            } catch (_) { return { done: true, count: 0, total: 0 }; }
+        }, TARGET_CHAT_ID);
+
+        if (pageResult.done || pageResult.count === 0) {
+            emitProgress(socket, `📄 Chargement terminé : ${pageResult.total || totalPagesLoaded * 50} msgs en mémoire (${totalPagesLoaded} page(s))`);
+            break;
+        }
+
+        totalPagesLoaded++;
+        // Afficher la progression toutes les 5 pages pour ne pas spammer
+        if (totalPagesLoaded % 5 === 0 || totalPagesLoaded <= 3) {
+            emitProgress(socket, `📄 Page ${totalPagesLoaded} — ${pageResult.total} msgs en mémoire…`);
+        }
+        await new Promise(r => setTimeout(r, 150));
+    }
+
+    // ── Étape 3 : compter les messages texte disponibles ─────────────────────
+    emitProgress(socket, `🔎 Comptage des messages texte (depuis ts=${lastTs})…`);
+
+    const countInfo = await entry.client.pupPage.evaluate((chatId, sinceTs) => {
+        try {
+            const chat = window.Store.Chat.get(chatId);
+            if (!chat) return { ok: false, error: 'Chat perdu.' };
+            const all = chat.msgs.getModelsArray()
+                .filter(m => !m.isNotification && !m.isStatusV3);
+            const filtered = all.filter(m =>
+                (m.type === 'chat' || !m.type) &&
+                m.body && m.body.trim() !== '' &&
+                (m.t || 0) > sinceTs
+            );
+            return { ok: true, total: filtered.length, chatName: chat.name || chat.formattedTitle || chatId };
+        } catch (e) { return { ok: false, error: e.message }; }
+    }, TARGET_CHAT_ID, lastTs);
+
+    if (!countInfo || !countInfo.ok) {
+        socket.emit('contact-not-found', { error: countInfo?.error || 'Impossible de lire les messages.' });
+        return;
+    }
+
+    const chatName = countInfo.chatName || TARGET_PHONE;
+    emitProgress(socket, `📝 ${countInfo.total} message(s) texte à enregistrer…`);
+
+    // ── Étape 4 : récupérer et insérer par batches de 500 ────────────────────
+    const BATCH_SIZE = 500;
+    let totalSaved = 0;
+    let batchOffset = 0;
+
+    while (batchOffset < countInfo.total) {
+        const batch = await entry.client.pupPage.evaluate((chatId, sinceTs, offset, batchSize) => {
+            try {
+                const chat = window.Store.Chat.get(chatId);
+                if (!chat) return { ok: false, error: 'Chat perdu.' };
+                const all = chat.msgs.getModelsArray()
+                    .filter(m => !m.isNotification && !m.isStatusV3)
+                    .sort((a, b) => (a.t || 0) - (b.t || 0));
+                const filtered = all.filter(m =>
+                    (m.type === 'chat' || !m.type) &&
+                    m.body && m.body.trim() !== '' &&
+                    (m.t || 0) > sinceTs
+                );
+                const slice = filtered.slice(offset, offset + batchSize);
+                return {
+                    ok: true,
+                    msgs: slice.map(m => ({
+                        id: m.id._serialized,
+                        body: m.body || '',
+                        fromMe: m.id.fromMe,
+                        author: m.author || m.from || '',
+                        timestamp: m.t || m.timestamp || 0,
+                    })),
+                };
+            } catch (e) { return { ok: false, error: e.message }; }
+        }, TARGET_CHAT_ID, lastTs, batchOffset, BATCH_SIZE);
+
+        if (!batch || !batch.ok) {
+            logE('Batch error:', batch?.error);
+            break;
+        }
+        if (batch.msgs.length === 0) break;
+
+        try {
+            totalSaved += insertMany(batch.msgs);
+        } catch (dbErr) {
+            logE('insertMany error (batch):', dbErr.message);
+            socket.emit('sync-progress', { status: 'error', message: `❌ Erreur DB : ${dbErr.message}` });
+            break;
+        }
+
+        batchOffset += batch.msgs.length;
+        emitProgress(socket, `💾 ${batchOffset}/${countInfo.total} traités — ${totalSaved} nouveaux enregistrés…`);
+
+        // Envoyer les messages déjà enregistrés en temps réel toutes les 500
+        socket.emit('contact-messages', {
+            found: true, fromDb: true,
+            messages: getStoredMessages(),
+            newCount: totalSaved, chatName,
+        });
+    }
+
+    emitProgress(socket, `✅ Terminé — ${totalSaved} nouveau(x) message(s) — total en base : ${getStoredMessages().length}`);
+    log(`Sync terminée: ${countInfo.total} msgs texte traités, ${totalSaved} nouveaux insérés`);
+
+    socket.emit('contact-messages', {
+        found: true, fromDb: false,
+        messages: getStoredMessages(),
+        newCount: totalSaved, chatName,
+    });
+}
+
+
+
+
+
+
+
+// ─── Socket.IO ────────────────────────────────────────────────────────────────────────────
 io.on('connection', (socket) => {
-    console.log(`[${socket.id}] Browser connected.`);
-    let currentSession = null; // session name this socket is watching
+    log(`[${socket.id}] Navigateur connecté.`);
+    let currentSession = null;
 
     function unsubscribe() {
         if (!currentSession) return;
-        const entry = waClients.get(currentSession);
-        if (entry) entry.listeners.delete(socket.id);
+        const e = waClients.get(currentSession);
+        if (e) e.listeners.delete(socket.id);
         currentSession = null;
     }
 
     function subscribe(sessionName) {
         unsubscribe();
         currentSession = sessionName;
-        const entry = waClients.get(sessionName);
-        if (entry) entry.listeners.add(socket.id);
+        const e = waClients.get(sessionName);
+        if (e) e.listeners.add(socket.id);
     }
 
-    // ── List saved sessions ────────────────────────────────────────────────────
+    // ── Sessions ──────────────────────────────────────────────────────────────
     socket.on('list-sessions', () => {
-        const registry = loadRegistry();
-        const result = registry.map((s) => ({
-            name: s.name,
-            createdAt: s.createdAt,
-            status: waClients.has(s.name) ? waClients.get(s.name).status : 'offline',
-        }));
-        socket.emit('sessions', result);
-    });
-
-    // ── Create a new named session (will ask for QR if no saved auth) ──────────
-    socket.on('create-session', async ({ name }) => {
-        if (!name || typeof name !== 'string' || !name.trim()) {
-            return socket.emit('error', { message: 'Session name is required.' });
-        }
-        const sessionName = name.trim();
-
-        // Persist to registry if new
-        const registry = loadRegistry();
-        if (!registry.find((s) => s.name === sessionName)) {
-            registry.push({ name: sessionName, createdAt: Date.now() });
-            saveRegistry(registry);
-        }
-
-        const entry = await getOrCreateClient(sessionName);
-        subscribe(sessionName);
-        entry.listeners.add(socket.id);
-
-        // If client is already past QR phase, report current status immediately
-        if (entry.status === 'ready') {
-            socket.emit('wa-status', { status: 'ready' });
-        } else if (entry.status === 'authenticated') {
-            socket.emit('wa-status', { status: 'authenticated' });
-        } else if (entry.status === 'qr') {
-            // QR already generated; send it to this socket directly
-            // (the next QR event will reach it via broadcast)
-        }
-    });
-
-    // ── Connect to an existing saved session ───────────────────────────────────
-    socket.on('connect-session', async ({ name }) => {
-        const registry = loadRegistry();
-        if (!registry.find((s) => s.name === name)) {
-            return socket.emit('error', { message: 'Session not found.' });
-        }
-
-        const entry = await getOrCreateClient(name);
-        subscribe(name);
-        entry.listeners.add(socket.id);
-
-        // Report current status so the UI can jump straight to 'ready' if cached
-        socket.emit('wa-status', { status: entry.status });
-    });
-
-    // ── Delete a saved session ─────────────────────────────────────────────────
-    socket.on('delete-session', async ({ name }) => {
-        await destroyClient(name);
-        const registry = loadRegistry().filter((s) => s.name !== name);
-        saveRegistry(registry);
-        // Remove LocalAuth data on disk
-        try {
-            fs.rmSync(path.join(AUTH_DATA_PATH, `session-${name}`), { recursive: true, force: true });
-        } catch (_) { }
-        socket.emit('session-deleted', { name });
-        socket.emit('sessions', registry.map((s) => ({
-            name: s.name,
-            createdAt: s.createdAt,
+        socket.emit('sessions', loadRegistry().map(s => ({
+            name: s.name, createdAt: s.createdAt,
             status: waClients.has(s.name) ? waClients.get(s.name).status : 'offline',
         })));
     });
 
-    // ── Get chats ──────────────────────────────────────────────────────────────
-    // Reads the 5 most recent chats directly from WA's in-memory store — no
-    // full chat list fetch, returns in milliseconds.
-    socket.on('get-chats', async () => {
-        if (!currentSession) return socket.emit('error', { message: 'No active session.' });
-        const entry = waClients.get(currentSession);
-        if (!entry || entry.status !== 'ready') {
-            return socket.emit('error', { message: 'WhatsApp not ready.' });
+    socket.on('create-session', async ({ name }) => {
+        if (!name?.trim()) return socket.emit('error', { message: 'Nom de session requis.' });
+        const sessionName = name.trim();
+        const registry = loadRegistry();
+        if (!registry.find(s => s.name === sessionName)) {
+            registry.push({ name: sessionName, createdAt: Date.now() });
+            saveRegistry(registry);
         }
-        try {
-            const chats = await entry.client.pupPage.evaluate(() => {
-                try {
-                    const all = window.Store.Chat.getModelsArray();
-                    const sorted = all
-                        .filter(c => c && c.id)
-                        .sort((a, b) => (b.t || b.timestamp || 0) - (a.t || a.timestamp || 0))
-                        .slice(0, 5);
-                    return sorted.map(c => ({
-                        id: c.id._serialized,
-                        name: c.name || c.formattedTitle || c.id.user || '',
-                        isGroup: c.isGroup || false,
-                        lastMessage: (c.lastMessage && c.lastMessage.body ? c.lastMessage.body : '').slice(0, 80),
-                        timestamp: c.t || c.timestamp || 0,
-                        unreadCount: c.unreadCount || 0,
-                    }));
-                } catch (e) {
-                    return { storeError: e.message };
-                }
+        const entry = await getOrCreateClient(sessionName);
+        subscribe(sessionName);
+        entry.listeners.add(socket.id);
+        if (entry.status === 'ready') socket.emit('wa-status', { status: 'ready' });
+        else if (entry.status === 'authenticated') socket.emit('wa-status', { status: 'authenticated' });
+    });
+
+    socket.on('connect-session', async ({ name }) => {
+        if (!loadRegistry().find(s => s.name === name))
+            return socket.emit('error', { message: 'Session introuvable.' });
+        const entry = await getOrCreateClient(name);
+        subscribe(name);
+        entry.listeners.add(socket.id);
+        socket.emit('wa-status', { status: entry.status });
+    });
+
+    socket.on('delete-session', async ({ name }) => {
+        await destroyClient(name);
+        const registry = loadRegistry().filter(s => s.name !== name);
+        saveRegistry(registry);
+        try { fs.rmSync(path.join(AUTH_DATA_PATH, `session-${name}`), { recursive: true, force: true }); } catch (_) { }
+        socket.emit('session-deleted', { name });
+        socket.emit('sessions', registry.map(s => ({
+            name: s.name, createdAt: s.createdAt,
+            status: waClients.has(s.name) ? waClients.get(s.name).status : 'offline',
+        })));
+    });
+
+    // ── Charger le contact cible (DB puis sync WA) ────────────────────────────
+    socket.on('connect-to-contact', async () => {
+        log(`[${socket.id}] connect-to-contact`);
+
+        // 1. Affichage immédiat depuis la base de données
+        const stored = getStoredMessages();
+        if (stored.length > 0) {
+            socket.emit('contact-messages', {
+                found: true, fromDb: true,
+                messages: stored, newCount: 0, chatName: TARGET_PHONE,
             });
-
-            if (chats && chats.storeError) throw new Error(chats.storeError);
-            socket.emit('chats', chats || []);
-        } catch (err) {
-            // Fallback to the standard API if store read fails
-            console.warn(`[${currentSession}] store chat read failed (${err.message}) — falling back to getChats()`);
-            try {
-                const fallback = await entry.client.getChats();
-                socket.emit('chats', fallback.slice(0, 5).map((c) => ({
-                    id: c.id._serialized,
-                    name: c.name || c.id.user,
-                    isGroup: c.isGroup,
-                    lastMessage: c.lastMessage?.body?.slice(0, 80) || '',
-                    timestamp: c.timestamp,
-                    unreadCount: c.unreadCount,
-                })));
-            } catch (fe) {
-                socket.emit('error', { message: `Failed to fetch chats: ${fe.message}` });
-            }
         }
-    });
 
-    // ── Get messages ───────────────────────────────────────────────────────────
-    // Reads directly from the WA Web in-memory store — NO openChat/navigation,
-    // no risk of hanging. Falls back to fetchMessages if store is empty.
-    socket.on('get-messages', async ({ chatId, limit = 50 }) => {
-        if (!currentSession) return socket.emit('error', { message: 'No active session.' });
+        // 2. Sync depuis WhatsApp en arrière-plan
+        if (!currentSession) return;
         const entry = waClients.get(currentSession);
-        if (!entry || entry.status !== 'ready') {
-            return socket.emit('error', { message: 'WhatsApp not ready.' });
-        }
-        const safeLimit = Math.min(Math.max(Number(limit) || 50, 1), 500);
-        console.log(`[${currentSession}] get-messages chatId=${chatId} limit=${safeLimit}`);
+        if (!entry || entry.status !== 'ready') return;
         try {
-            entry.client.pupPage.setDefaultTimeout(30000);
-
-            const result = await entry.client.pupPage.evaluate(async (cid, lim) => {
-                try {
-                    const chat = window.Store.Chat.get(cid);
-                    if (!chat) return { ok: false, error: 'Chat introuvable dans le store WA.' };
-
-                    // Load older pages without navigating the UI
-                    const MAX_PAGES = 8;
-                    for (let i = 0; i < MAX_PAGES; i++) {
-                        const before = chat.msgs.getModelsArray()
-                            .filter(m => !m.isNotification && !m.isStatusV3).length;
-                        if (before >= lim) break;
-                        try {
-                            const loaded = await window.Store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
-                            if (!loaded || loaded.length === 0) break;
-                        } catch (_) { break; }
-                        await new Promise(r => setTimeout(r, 250));
-                    }
-
-                    const all = chat.msgs.getModelsArray()
-                        .filter(m => !m.isNotification && !m.isStatusV3)
-                        .sort((a, b) => (a.t || 0) - (b.t || 0));
-
-                    return {
-                        ok: true,
-                        msgs: all.slice(-lim).map(m => ({
-                            id: m.id._serialized,
-                            body: m.body || '',
-                            fromMe: m.id.fromMe,
-                            author: m.author || m.from || '',
-                            timestamp: m.t || m.timestamp || 0,
-                            type: m.type || 'chat',
-                        })),
-                    };
-                } catch (e) {
-                    return { ok: false, error: e.message };
-                }
-            }, chatId, safeLimit);
-
-            if (!result || !result.ok) {
-                const errMsg = result ? result.error : 'Évaluation échouée';
-                console.warn(`[${currentSession}] store read failed (${errMsg}) — falling back to fetchMessages`);
-                try {
-                    const chat = await entry.client.getChatById(chatId);
-                    const messages = await chat.fetchMessages({ limit: safeLimit });
-                    return socket.emit('messages', {
-                        chatId,
-                        messages: messages.map(m => ({
-                            id: m.id._serialized,
-                            body: m.body || '',
-                            fromMe: m.fromMe,
-                            author: m.author || m.from || '',
-                            timestamp: m.timestamp || 0,
-                            type: m.type || 'chat',
-                        })),
-                    });
-                } catch (fe) {
-                    // Always unblock the frontend even on failure
-                    return socket.emit('messages', { chatId, messages: [], error: fe.message });
-                }
-            }
-
-            console.log(`[${currentSession}] returning ${result.msgs.length} messages`);
-            socket.emit('messages', { chatId, messages: result.msgs });
+            await syncContactMessages(entry, socket, false);
         } catch (err) {
-            console.error(`[${currentSession}] get-messages error:`, err.message);
-            // Always respond so the frontend never stays stuck on the loading spinner
-            socket.emit('messages', { chatId, messages: [], error: err.message });
+            logE('connect-to-contact error:', err);
+            socket.emit('sync-progress', { status: 'error', message: `❌ ${err.message}` });
+            // Toujours renvoyer ce qu'on a en base pour débloquer l'UI
+            socket.emit('contact-messages', {
+                found: true, fromDb: true,
+                messages: getStoredMessages(),
+                newCount: 0, chatName: TARGET_PHONE,
+            });
         }
     });
 
-    // ── Analyze with Gemini ────────────────────────────────────────────────────
-    socket.on('analyze', async ({ geminiKey, question, contextMessages }) => {
-        if (!geminiKey) return socket.emit('error', { message: 'Gemini API key is required.' });
-        if (!question || !contextMessages?.length) {
-            return socket.emit('error', { message: 'Question and context messages are required.' });
-        }
+    // ── Rafraîchir (sync complète, INSERT OR IGNORE pour les doublons) ─────────
+    socket.on('refresh-contact', async () => {
+        log(`[${socket.id}] refresh-contact`);
+        if (!currentSession) return socket.emit('error', { message: 'Pas de session active.' });
+        const entry = waClients.get(currentSession);
+        if (!entry || entry.status !== 'ready')
+            return socket.emit('error', { message: 'WhatsApp non prêt.' });
         try {
-            const conversationText = contextMessages
-                .map((m) => {
-                    const date = new Date(m.timestamp * 1000).toLocaleString('fr-FR');
-                    const who = m.fromMe ? 'Moi' : m.author || 'Interlocuteur';
-                    return `[${date}] ${who}: ${m.body}`;
-                })
-                .join('\n');
+            await syncContactMessages(entry, socket, false); // lastTs=0 → tout l'historique
+        } catch (err) {
+            logE('refresh-contact error:', err);
+            socket.emit('sync-progress', { status: 'error', message: `❌ ${err.message}` });
+            socket.emit('contact-messages', {
+                found: true, fromDb: true,
+                messages: getStoredMessages(),
+                newCount: 0, chatName: TARGET_PHONE,
+            });
+        }
+    });
 
-            const prompt = `Tu es un assistant expert en analyse de conversations.\n\nVoici une conversation WhatsApp :\n---\n${conversationText}\n---\n\nQuestion de l'utilisateur : ${question}\n\nRéponds de manière claire, structurée et en français.`;
+    // ── Messages stockés (sans sync WA) ──────────────────────────────────────
+    socket.on('get-stored-messages', () => {
+        const msgs = getStoredMessages();
+        socket.emit('contact-messages', {
+            found: msgs.length > 0, fromDb: true,
+            messages: msgs, newCount: 0, chatName: TARGET_PHONE,
+        });
+    });
+
+    // ── Charger TOUT l'historique depuis la DB (tri chronologique) ────────────
+    socket.on('load-all-history', () => {
+        log(`[${socket.id}] load-all-history`);
+        const msgs = getStoredMessages(); // déjà trié par timestamp ASC
+        socket.emit('contact-messages', {
+            found: msgs.length > 0, fromDb: true,
+            messages: msgs, newCount: 0, chatName: TARGET_PHONE,
+            scrollTop: true, // signal au front de remonter en haut
+        });
+        socket.emit('sync-progress', {
+            status: 'db',
+            message: `📂 ${msgs.length} messages chargés depuis la base de données`,
+        });
+        setTimeout(() => socket.emit('sync-clear', {}), 4000);
+    });
+
+    // ── Analyser avec Gemini ──────────────────────────────────────────────────
+    socket.on('analyze', async ({ geminiKey, question, contextMessages }) => {
+        if (!geminiKey) return socket.emit('error', { message: 'Clé API Gemini requise.' });
+        if (!question || !contextMessages?.length)
+            return socket.emit('error', { message: 'Question et messages de contexte requis.' });
+        try {
+            const conversationText = contextMessages.map(m => {
+                const date = new Date(m.timestamp * 1000).toLocaleString('fr-FR');
+                const who = m.fromMe ? 'Moi' : (m.author || 'Contact');
+                return `[${date}] ${who}: ${m.body}`;
+            }).join('\n');
+
+            const prompt = `Tu es un assistant expert en analyse de conversations WhatsApp.\n\nConversation avec +${TARGET_PHONE} :\n---\n${conversationText}\n---\n\nQuestion : ${question}\n\nRéponds de manière claire et en français.`;
 
             const genAI = new GoogleGenerativeAI(geminiKey);
-            const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+            const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
 
             socket.emit('ai-start', {});
             const result = await model.generateContentStream(prompt);
@@ -398,21 +594,23 @@ io.on('connection', (socket) => {
             }
             socket.emit('ai-done', {});
         } catch (err) {
-            console.error('Gemini error:', err.message);
-            socket.emit('error', { message: `Gemini error: ${err.message}` });
+            logE('Gemini error:', err.message);
+            socket.emit('error', { message: `Erreur Gemini: ${err.message}` });
         }
     });
 
-    // ── Disconnect — do NOT destroy the WA client ─────────────────────────────
-    // The WA session lives on so the user doesn't need to scan again on reconnect.
     socket.on('disconnect', (reason) => {
-        console.log(`[${socket.id}] Browser disconnected (${reason}).`);
+        log(`[${socket.id}] Déconnecté (${reason}).`);
         unsubscribe();
     });
 });
 
-// ─── Start Server ──────────────────────────────────────────────────────────────
+// ─── Démarrage ────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 httpServer.listen(PORT, () => {
-    console.log(`Backend running on http://0.0.0.0:${PORT}`);
+    log(`Backend sur http://0.0.0.0:${PORT}`);
+    log(`Contact cible : +${TARGET_PHONE} (${TARGET_CHAT_ID})`);
+    log(`Log: ${LOG_FILE}`);
+    log(`DB : ${DB_PATH}`);
 });
+

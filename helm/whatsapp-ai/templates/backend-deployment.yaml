@@ -75,6 +75,9 @@ spec:
             # Chromium needs a large /dev/shm — mount a Memory-backed tmpfs
             - name: dshm
               mountPath: /dev/shm
+            # Logs directory
+            - name: logs
+              mountPath: /app/logs
             # Persistent named-session auth data (LocalAuth + registry.json)
             {{- if .Values.persistence.enabled }}
             - name: wwebjs-auth
@@ -85,6 +88,8 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: {{ .Values.backend.shmSize }}
+        - name: logs
+          emptyDir: {}
         {{- if .Values.persistence.enabled }}
         - name: wwebjs-auth
           persistentVolumeClaim:
